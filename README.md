@@ -2,6 +2,8 @@
 
 This is an example macro for controlling individual mics inputs on Cisco Collab Devices. This enables users to change the gain and toggle the mute for individual microphone inputs availabe on the Deivce.
 
+![OSD Screenshot](images/screenshot.png)
+
 ## Overview
 
 This macro creates a UI Extension panel based on the config you provide. Therefore allowing you to specify which microphones you which to make available to control.
