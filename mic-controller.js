@@ -135,14 +135,23 @@ function createMicRow(micNum) {
 
 
 async function createPanel() {
+
   const order = await panelOrder(config.panelId);
   const panelId = config.panelId;
   const button = config.button;
   const rows = config.mics.map(createMicRow)
+
+
+  const mtrDevice = await xapi.Command.MicrosoftTeams.List({ Show: 'Installed' })
+    .then(() => true)
+    .catch(() => false)
+
+  const location = mtrDevice ? 'ControlPanel' : 'HomeScreenAndCallControls'
+
   const panel = `
   <Extensions>
     <Panel>
-      <Location>HomeScreenAndCallControls</Location>
+      <Location>${location}</Location>
       <Icon>${button.icon}</Icon>
       <Name>${button.name}</Name>
       <ActivityType>Custom</ActivityType>
