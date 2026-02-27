@@ -6,8 +6,8 @@
  *                    	Cisco Systems
  * 
  * 
- * Version: 1-0-0
- * Released: 05/01/25
+ * Version: 1-1-0
+ * Released: 02/27/26
  * 
  * Example macro for controlling individual mics inputs
  * on Cisco Collab Devices
@@ -26,10 +26,15 @@ import xapi from 'xapi';
 
 const config = {
   button: {
-    name: 'Mic Controls',   // Name of the Button and Panel Page
-    icon: 'Microphone'      // One of the supported native icons name
+    name: 'Mic Controls',     // Name of the Button and Panel Page
+    icon: 'Microphone',       // One of the supported native icons name
+    location: 'CallControls'  // Location of the Panel Button
   },
-  mics: [1, 2, 3, 4],       // Mics which you wish to control
+  audioInputs: {
+    Microphone: [1, 2],       
+    Ethernet: [1.1, 2.3, 3],
+    USBMicrophone: [1],
+  },
   panelId: 'micController'  // PanelId is used for the base panel and widget Ids
 }
 
@@ -38,126 +43,214 @@ const config = {
 **********************************************************/
 
 let gainLevel = 'Gain';
-let max = 70;
 
 init();
 
 async function init() {
   gainLevel = await checkGainLevel();
-  max = (gainLevel == 'Gain') ? 24 : 70;
   await createPanel();
   syncUI();
-  xapi.Config.Audio.Input.Microphone.on(processMicChange);
+  xapi.Config.Audio.Input.on(processMicChange);
   xapi.Event.UserInterface.Extensions.Widget.Action.on(processWidgetAction);
 }
 
 
 async function checkGainLevel() {
-  const { Level, Gain } = await xapi.Config.Audio.Input.Microphone[1].get();
-  console.log(Level, Gain)
-  if (Level) return 'Level'
-  if (Gain) return 'Gain'
-
+  const inputs = await xapi.Config.Audio.Input.get();
+  const { Ethernet, Microphone, USBMicrophone } = inputs;
+  if (Ethernet) return typeof Ethernet?.[0]?.Channel?.[0].Gain != 'undefined' ? 'Gain' : 'Level'
+  if (Microphone) return Microphone.some(mic => typeof mic?.Gain != 'undefined') ? 'Gain' : 'Level'
+  if (USBMicrophone) return typeof USBMicrophone?.[0]?.Gain != 'undefined' ? 'Gain' : 'Level'
 }
 
-function processWidgetAction({ WidgetId, Type, Value }) {
+function processWidgetAction({ WidgetId, Type, Value, Origin, PeripheralId }) {
   if (Type != 'released') return
   if (!WidgetId.startsWith(config.panelId)) return
-  const [_widgitId, type, micNum] = WidgetId.split('-');
-  if (type == 'gain') return setMicGain(micNum, Value);
-  if (type == 'mute') return toggleMicMode(micNum);
+  const [_panelId, type, micType, micNum, subId] = WidgetId.split('-');
+  if (type == 'gain') return setMicGain(micType, micNum, subId, Value);
+  if (type == 'mute') return toggleMicMode(micType, micNum, subId);
 }
 
 
-function processMicChange({ Level, Mode, id }) {
-  if (!config.mics.includes(parseInt(id))) return
-  if (Level) return setSliderWidget(id, Level)
-  if (Mode) return setMuteWidget(id, Mode == 'Off')
+function processMicChange(inputChange) {
+  console.debug('inputChange:', inputChange)
+  const micType = Object.keys(inputChange)?.[0];
+  const audioInputs = config.audioInputs;
+  if (typeof audioInputs?.[micType] == 'undefined') return
+  const { Mode, Gain, Level, Channel, id } = inputChange[micType]?.[0];
+  const { widgetSuffix } = convertMicId(micType, `${id}`);
+  const newLevel = Gain ?? Level;
+  if (typeof newLevel != 'undefined') setSliderWidget(micType, widgetSuffix, Level)
+  if (typeof Mode != 'undefined') setMuteWidget(widgetSuffix, Mode == 'Off')
+  if (typeof Channel != 'undefined') {
+    const subId = Channel?.[0]?.id;
+    if (typeof subId == 'undefined') return
+    const { Mode, Gain, Level } = Channel?.[0];
+    const newLevel = Gain ?? Level;
+    const { widgetSuffix } = convertMicId(micType, `${id}.${subId}`);
+    if (typeof newLevel != 'undefined') setSliderWidget(micType, widgetSuffix, newLevel)
+    if (typeof Mode != 'undefined') setMuteWidget(widgetSuffix, Mode == 'Off')
+  }
+}
+
+
+function convertMicId(micType, id) {
+  if (micType != 'Ethernet') return { id, widgetSuffix: `${micType}-${id}` }
+  const [micNum, subId] = (id + "").split(".");
+  if (typeof subId == 'undefined') return { id: micNum, subId: 1, widgetSuffix: `${micType}-${micNum}-1` }
+  return { id: micNum, subId, widgetSuffix: `${micType}-${micNum}-${subId}` }
 }
 
 async function syncUI() {
-  const mics = await xapi.Config.Audio.Input.Microphone.get();
-  const controlledMics = mics.filter(m => config.mics.includes(parseInt(m.id)))
-  console.log(controlledMics)
-  controlledMics.forEach(m => setSliderWidget(m.id, m.Level ?? m.Gain));
-  controlledMics.forEach(m => setMuteWidget(m.id, m.Mode == 'Off'))
+  const inputs = await xapi.Config.Audio.Input.get();
+  const audioInputs = config.audioInputs;
+  const micTypes = Object.keys(audioInputs);
+  micTypes.map(micType => audioInputs[micType].map(id => updateUI(micType, id, inputs)));
+}
+
+function getAudioValue(inputs, value, micType, id, subId) {
+  const match = inputs?.[micType].find(mic => mic.id == id)
+  if (micType != 'Ethernet' || typeof subId == 'undefined') return match?.[value]
+  const matchChannel = match?.Channel?.find(channel => channel.id == subId)
+  return matchChannel?.[value]
+}
+
+function updateUI(micType, micId, inputs) {
+  console.log('Updating UI - micType:', micType, 'micId', micId)
+  const { id, subId, widgetSuffix } = convertMicId(micType, micId);
+  console.log('Convered - id:', id, '-subId:', subId);
+  const gain = getAudioValue(inputs, gainLevel, micType, id, subId);
+  const mode = getAudioValue(inputs, 'Mode', micType, id, subId);
+  if (typeof gain != 'undefined') setSliderWidget(micType, widgetSuffix, gain);
+  if (typeof mode != 'undefined') setMuteWidget(widgetSuffix, mode == 'Off');
 }
 
 
-function setSliderWidget(micNum, value) {
-  const mappedValue = Math.round((value / max) * 255)
-  console.log('Setting Mic Slider:', micNum, 'Value:', value, 'MappedValue', mappedValue)
-  const panelId = config.panelId;
-  xapi.Command.UserInterface.Extensions.Widget.SetValue(
-    { Value: mappedValue, WidgetId: `${panelId}-gain-${micNum}` });
+function setSliderWidget(micType, widgetSuffix, value) {
+  if (typeof value == 'undefined') return
+  const WidgetId = `${config.panelId}-gain-${widgetSuffix}`;
+  const max = micType == 'USBMicrophone' || (micType == 'Microphone' && gainLevel == 'Gain') ? 24 : 70;
+  const mappedValue = Math.round(((value / max)) * 255)
+  console.log('Setting WidgetId:', WidgetId, 'Slider Value:', mappedValue, '- Mapped From Value:', value, 'Max:', max);
+  xapi.Command.UserInterface.Extensions.Widget.SetValue({ Value: mappedValue, WidgetId });
 }
 
 
-function setMuteWidget(micNum, active) {
-  const WidgetId = `${config.panelId}-mute-${micNum}`
-  console.log('Setting Mic :', micNum, 'Mute: ', active)
+function setMuteWidget(widgetSuffix, active) {
+  const WidgetId = `${config.panelId}-mute-${widgetSuffix}`;
   if (active) {
+    console.log('SetValue WidgetId:', WidgetId, 'as active');
     xapi.Command.UserInterface.Extensions.Widget.SetValue({ Value: 'active', WidgetId });
   } else {
+    console.log('UnsetValue WidgetId:', WidgetId);
     xapi.Command.UserInterface.Extensions.Widget.UnsetValue({ WidgetId });
   }
 }
 
-function setMicGain(micNum, value) {
+function setMicGain(micType, micNum, subId, value) {
+  const max = micType == 'USBMicrophone' || (micType == 'Microphone' && gainLevel == 'Gain') ? 24 : 70;
   const mappedValue = Math.round((value / 255) * max);
-  console.log('Setting Mic:', micNum, 'Slider Value:', value, 'Mapped:', mappedValue, 'Type', gainLevel)
-  xapi.Config.Audio.Input.Microphone[micNum][gainLevel].set(mappedValue);
+  const hasSubId = typeof subId != 'undefined';
+  const subText = hasSubId ? `.${subId}` : '';
+  console.log(`Setting ${micType} ${micNum}${subText} ${gainLevel}: ${mappedValue}`)
+  if (hasSubId) {
+    xapi.Config.Audio.Input[micType][micNum].Channel[subId][gainLevel].set(mappedValue);
+  } else {
+    xapi.Config.Audio.Input[micType][micNum][gainLevel].set(mappedValue);
+  }
 }
 
-async function toggleMicMode(micNum) {
-  const currentMode = await xapi.Config.Audio.Input.Microphone[micNum].Mode.get();
-  const newMode = currentMode == 'On' ? 'Off' : 'On'
-  console.log('Setting Mic:', micNum, 'Mode:', newMode)
-  xapi.Config.Audio.Input.Microphone[micNum].Mode.set(newMode);
+async function toggleMicMode(micType, micNum, subId) {
+  const inputs = await xapi.Config.Audio.Input.get();
+  const mode = getAudioValue(inputs, 'Mode', micType, micNum, subId);
+  const newMode = mode == 'On' ? 'Off' : 'On'
+
+  if (micType == 'Ethernet') {
+    if (typeof subId != 'undefined') {
+      console.log(`Setting ${micType} Id: ${micNum} SubId: ${subId} Mode: ${newMode}`);
+      xapi.Config.Audio.Input[micType][micNum].Channel[subId].Mode.set(newMode).then(result => console.log('result', result))
+    } else {
+      console.log(`Setting ${micType} ${micNum} Mode: ${newMode}`);
+      xapi.Config.Audio.Input[micType][micNum].Mode.set(newMode);
+    }
+  } else {
+    console.log(`Setting ${micType} ${micNum} Mode: ${newMode}`);
+    xapi.Config.Audio.Input[micType][micNum].Mode.set(newMode);
+  }
+
 }
 
-function createMicRow(micNum) {
+function createMicRow(micType, micId, inputs) {
   const panelId = config.panelId;
+  const { id, subId, widgetSuffix } = convertMicId(micType, micId);
+  const gain = getAudioValue(inputs, gainLevel, micType, id, subId);
+  const mode = getAudioValue(inputs, 'Mode', micType, id, subId);
+  const hasGain = typeof gain != 'undefined';
+  const hasMode = typeof mode != 'undefined';
+
+  // Don't include rows for connectors that have no gain/level and mute controls
+  if (!(hasGain || hasMode)) return ''
+
+  const slider = hasGain ?
+    `<Widget>
+      <WidgetId>${panelId}-gain-${widgetSuffix}</WidgetId>
+      <Type>Slider</Type>
+      <Options>size=3</Options>
+    </Widget>` :
+    `<Widget>
+        <WidgetId>${panelId}-gainText-${widgetSuffix}</WidgetId>
+        <Name>${gainLevel} Not Available For This Input</Name>
+        <Type>Text</Type>
+        <Options>size=3;align=center</Options>
+    </Widget>`
+
+  const mute = hasMode ?
+    `<Widget>
+        <WidgetId>${panelId}-mute-${widgetSuffix}</WidgetId>
+        <Type>Button</Type>
+        <Options>size=1;icon=mic_muted</Options>
+    </Widget>` :
+    `<Widget>
+        <WidgetId>${panelId}-modeText-${widgetSuffix}</WidgetId>
+        <Name>Mute Not Supported</Name>
+        <Type>Text</Type>
+        <Options>size=1;align=center;fontSize=small</Options>
+    </Widget>`;
+
   return `<Row>
-            <Name>Mic ${micNum}</Name>
-            <Widget>
-              <WidgetId>${panelId}-gain-${micNum}</WidgetId>
-              <Type>Slider</Type>
-              <Options>size=3</Options>
-            </Widget>
-            <Widget>
-              <WidgetId>${panelId}-mute-${micNum}</WidgetId>
-              <Type>Button</Type>
-              <Options>size=1;icon=mic_muted</Options>
-            </Widget>
+            <Name>${micType} ${id}${subId ? '.'+subId : ''}</Name>
+            ${slider}
+            ${mute}
           </Row>`
 }
 
 
 async function createPanel() {
-
   const order = await panelOrder(config.panelId);
   const panelId = config.panelId;
   const button = config.button;
-  const rows = config.mics.map(createMicRow)
-
+  const {icon, name, location} = button
+  const audioInputs = config.audioInputs;
+  const inputs = await xapi.Config.Audio.Input.get();
+  const micTypes = Object.keys(audioInputs);
+  const rows = micTypes.map(micType => audioInputs[micType].map(id => createMicRow(micType, id, inputs)));
 
   const mtrDevice = await xapi.Command.MicrosoftTeams.List({ Show: 'Installed' })
     .then(() => true)
     .catch(() => false)
 
-  const location = mtrDevice ? 'ControlPanel' : 'HomeScreenAndCallControls'
+  const panelLocation = mtrDevice && location == 'Hidden' ? 'ControlPanel' : location;
 
   const panel = `
   <Extensions>
     <Panel>
-      <Location>${location}</Location>
-      <Icon>${button.icon}</Icon>
-      <Name>${button.name}</Name>
+      <Location>${panelLocation}</Location>
+      <Icon>${icon}</Icon>
+      <Name>${name}</Name>
       <ActivityType>Custom</ActivityType>
       ${order}
       <Page>
-        <Name>${button.name}</Name>
+        <Name>${name}</Name>
         ${rows}
       </Page>
     </Panel>
