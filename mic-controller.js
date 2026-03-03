@@ -1,16 +1,31 @@
 /********************************************************
  * 
  * Author:              William Mills
- *                    	Technical Solutions Specialist 
+ *                    	Solutions Specialist 
  *                    	wimills@cisco.com
  *                    	Cisco Systems
  * 
  * 
- * Version: 1-1-0
+ * Version: 1-2-0
  * Released: 02/27/26
  * 
  * Example macro for controlling individual mics inputs
  * on Cisco Collab Devices
+ * 
+ * v1-1-0 Changes:
+ * 
+ * Added better handling when macro is run on different
+ * devices. Now if an input field doesn't have a gain or 
+ * mode option, the slider or mute widgets won't show.
+ * Also if the input doesn't have either, the mic input
+ * row isn't displayed.
+ * 
+ * v1-2-0 Changes:
+ * 
+ * Added a read only mode to config. When set to true
+ * widget inputs don't make any config change and the
+ * widget value is re-synced with the actual config.
+ * 
  * 
  * Full Readme and source code available on Github:
  * https://github.com/wxsd-sales/mic-controller-macro
@@ -31,10 +46,11 @@ const config = {
     location: 'CallControls'  // Location of the Panel Button
   },
   audioInputs: {
-    Microphone: [1, 2],       
+    Microphone: [1, 2],
     Ethernet: [1.1, 2.3, 3],
     USBMicrophone: [1],
   },
+  readOnlyMode: false,      // Set to true if you want to make the panel widget readonly
   panelId: 'micController'  // PanelId is used for the base panel and widget Ids
 }
 
@@ -63,9 +79,10 @@ async function checkGainLevel() {
   if (USBMicrophone) return typeof USBMicrophone?.[0]?.Gain != 'undefined' ? 'Gain' : 'Level'
 }
 
-function processWidgetAction({ WidgetId, Type, Value, Origin, PeripheralId }) {
+function processWidgetAction({ WidgetId, Type, Value }) {
   if (Type != 'released') return
   if (!WidgetId.startsWith(config.panelId)) return
+  if (config.readOnlyMode) return syncWidget(WidgetId)
   const [_panelId, type, micType, micNum, subId] = WidgetId.split('-');
   if (type == 'gain') return setMicGain(micType, micNum, subId, Value);
   if (type == 'mute') return toggleMicMode(micType, micNum, subId);
@@ -108,8 +125,22 @@ async function syncUI() {
   micTypes.map(micType => audioInputs[micType].map(id => updateUI(micType, id, inputs)));
 }
 
+async function syncWidget(widgetId) {
+  console.log('Syning widget Id', widgetId)
+  const [panelId, type, micType, micNum, subId] = widgetId.split('-');
+  const hasSubId = typeof subId != 'undefined';
+  const widgetSuffix = widgetId.replace(`${panelId}-${type}-`, '');
+  const input = hasSubId ?
+    await xapi.Config.Audio.Input[micType][micNum].Channel[subId].get() :
+    await xapi.Config.Audio.Input[micType][micNum].get();
+  const value = type == 'gain' ? input?.[gainLevel] : input?.Mode;
+  if (typeof value == 'undefined') return
+  if (type == 'gain') return setSliderWidget(micType, widgetSuffix, value);
+  if (type == 'mode') return setMuteWidget(widgetSuffix, value == 'Off');
+}
+
 function getAudioValue(inputs, value, micType, id, subId) {
-  const match = inputs?.[micType].find(mic => mic.id == id)
+  const match = inputs?.[micType]?.find(mic => mic.id == id)
   if (micType != 'Ethernet' || typeof subId == 'undefined') return match?.[value]
   const matchChannel = match?.Channel?.find(channel => channel.id == subId)
   return matchChannel?.[value]
@@ -218,7 +249,7 @@ function createMicRow(micType, micId, inputs) {
     </Widget>`;
 
   return `<Row>
-            <Name>${micType} ${id}${subId ? '.'+subId : ''}</Name>
+            <Name>${micType} ${id}${subId ? '.' + subId : ''}</Name>
             ${slider}
             ${mute}
           </Row>`
@@ -229,7 +260,7 @@ async function createPanel() {
   const order = await panelOrder(config.panelId);
   const panelId = config.panelId;
   const button = config.button;
-  const {icon, name, location} = button
+  const { icon, name, location } = button
   const audioInputs = config.audioInputs;
   const inputs = await xapi.Config.Audio.Input.get();
   const micTypes = Object.keys(audioInputs);
